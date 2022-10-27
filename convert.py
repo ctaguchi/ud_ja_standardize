@@ -6,8 +6,8 @@ file = sys.argv[1]
 assert file.endswith(".conllu"), "Input file needs to be in the .conllu format."
 newfile = sys.argv[2]
 assert newfile.endswith(".conllu"), "Output file needs to be in the .conllu format."
-stage = sys.argv[3]
-assert stage in ["1", "2", "3", "4"], "Stage must be one of 1, 2, 3, and 4."
+stage = int(sys.argv[3])
+assert stage in [1, 2, 3, 4], "Stage must be one of 1, 2, 3, and 4."
 print("Loading the data...")
 
 casedic = {
@@ -187,11 +187,16 @@ def read(file):
     return sents
 
 class Combine:
-    def __init__(self, table):
+    def __init__(self, table, n, sentence):
         self.table = table
+        self.n = n
+        self.sentence = sentence
 
-    def compound_noun(self, i, elems: list):
-        if elems["DEPREL"] == "compound" and elems["LEMMA"]not in (auxnoun + exceptions) and elems["XPOS"] not in ["接尾辞-名詞的-一般", "接尾辞-形状詞的"]:
+    def compound_noun(self, i: int, elems: list):
+        if elems["DEPREL"] == "compound" and \
+            elems["LEMMA"] not in (auxnoun + exceptions) and \
+            elems["XPOS"] not in ["接尾辞-名詞的-一般", "接尾辞-形状詞的"]:
+
             end = int(elems["HEAD"])
             for k in range(i+1, end):
                 elems["FORM"] += self.table[k]["FORM"]
@@ -202,244 +207,226 @@ class Combine:
             elems["HEAD"] = self.table[end-1]["HEAD"]
             elems["XPOS"] = self.table[end-1]["XPOS"]
 
+    def nominal_suffix(self, i: int, elems: list):
+        if elems["XPOS"] in ["接尾辞-名詞的-一般", "接尾辞-形状詞的"]:
+            j = 1
+            while self.table[i-j]["COMBINED"] == True:
+                j += 1
+            self.table[i-j]["FORM"] += elems["FORM"]
+            self.table[i-j]["LEMMA"] += elems["LEMMA"]
+            elems["COMBINED"] = True
+            if elems["XPOS"] == "接尾辞-名詞的-一般":
+                self.table[i-j]["UPOS"] = "NOUN"
+                self.table[i-j]["DEPREL"] = elems["DEPREL"]
+                self.table[i-j]["HEAD"] = elems["HEAD"]
+            elif elems["XPOS"] == "接尾辞-形状詞的":
+                self.table[i-j]["UPOS"] = "ADJ"
+                self.table[i-j]["DEPREL"] = "amod"
+    
+    def case_suffix(self, i: int, elems: list):
+        """
+        This conversion function is not to be executed when one does not
+        want to include case suffixes (格助詞) to be part of a word.
+        In such a case, specify 1 as the value of the stage variable.
+        """
+        prev = self.table[i-1]
+        if elems["UPOS"] == "ADP":
+            if prev["UPOS"] == "PUNCT":
+                # don't combine when e.g., "」と"
+                if elems["FORM"] == "と":
+                    elems["DEPREL"] = "mark" # と as a complementizer
+                return
+            elif prev["UPOS"] in ["VERB", "AUX"] and elems["FORM"] == "と":
+                # don't combine quotative (complementizer) と; change the DEPREL to mark
+                elems["DEPREL"] = "mark"
+                return
+            elif elems["XPOS"] == "助詞-係助詞":
+                # don't combine kakarijoshi; ignore them
+                return
+            elif elems["XPOS"] == "助詞-副助詞":
+                # don't combine fukujoshi; ignore them
+                return
+            else:
+                try:
+                    case = casedic[elems["FORM"]]
+                except:
+                    print("There is no case for {} in casedic.".format(elems["FORM"]))
+                j = 1
+                while self.table[i-j]["COMBINED"] == True:
+                    j += 1
+                self.table[i-j]["FEATS"] += case
+                self.table[i-j]["FORM"] += elems["FORM"]
+                elems["COMBINED"] = True
+
+    def light_verb_construction(self, i: int, elems: list):
+        prev = self.table[i-1]
+        if elems["XPOS"] in ["動詞-非自立可能-サ行変格", "動詞-非自立可能-上一段-カ行"] and \
+            prev["XPOS"] in ["名詞-普通名詞-サ変可能", "名詞-普通名詞-サ変形状詞可能"]:
+
+            elems["UPOS"] = "VERB"
+            elems["DEPREL"] = prev["DEPREL"]
+            elems["HEAD"], prev["HEAD"] = prev["HEAD"], elems["ID"]
+            j = 1
+            while self.table[i-j]["COMBINED"] == True:
+                j += 1
+            self.table[i-j]["UPOS"] = "NOUN"
+            self.table[i-j]["DEPREL"] = "compound:lvc"
+            # change HEAD of any elems modifying lvc noun
+            for word in self.table:
+                if word["HEAD"] == prev["ID"]:
+                    word["HEAD"] = elems["ID"]
+    
+    def auxiliary(self, n: int, sentence: str, i: int, elems: list):
+        """
+        Conversion function for verbal conjugations (inflections).
+        n and sentence are the sentence index and the sentence
+        string which are used just for debugging.
+        """
+        prev = self.table[i-1]
+        if elems["XPOS"].startswith("助動詞"):
+            try:
+                feat = morphdic[elems["LEMMA"]]
+            except:
+                print("There is no feature for {} in morphdic (sent {}).".format(elems["LEMMA"], n))
+            if elems["XPOS"] == "助動詞-助動詞-ダ" and (prev["UPOS"] in ["NOUN", "SCONJ", "VERB", "ADJ"]) and elems["FORM"] != "な":
+                if int(stage) == 4:
+                    feat = morphdic[elems["FORM"]]
+                    print(feat)
+                    elems["DEPREL"] = "cop"
+                else:
+                    return
+            if elems["XPOS"] == "助動詞-文語助動詞-ナリ-断定":
+                # early modern japanese copula
+                return
+            # 形容動詞（形状詞）〜な
+            elif elems["XPOS"] == "助動詞-助動詞-ダ" and elems["FORM"] == "な":
+                feat = morphdic[elems["FORM"]]
+            else:
+                feat = morphdic[elems["LEMMA"]]
+                # annotator's decision
+                if feat == ["Mood=Pot|Voice=Pass"]:
+                    print("Specify the feature for the sentence: {}".format(sentence))
+                    print("Word: {}{}".format(prev["FORM"], elems["FORM"]))
+                    while True:
+                        rareru = input("Type m if Mood=Pot or v if Voice=Pass.")
+                        if rareru == "m":
+                            feat = ["Mood=Pot"]
+                            break
+                        elif rareru == "v":
+                            feat = ["Voice=Pass"]
+                            break
+                        else:
+                            print("Input is an invalid character. Try again.")
+                if feat == ["Aspect=Prosp|Evident=Nfh"]:
+                    print("Specify the feature for the sentence: {}".format(sentence))
+                    souda = input("Type a if Aspect=Prosp or e if Evident=Nfh.")
+                    if souda == "a":
+                        feat = ["Aspect=Prosp"]
+                    elif souda == "e":
+                        feat = ["Evident=Nfh"]
+                    else:
+                        print("Input is an invalid character.")
+            # ない、ん
+            if elems["FORM"] == "ない" and elems["XPOS"] == "助動詞-助動詞-ナイ" or elems["FORM"] == "ん" and elems["XPOS"] == "助動詞-助動詞-ヌ":
+                feat += ["Tense=Pres", "VerbForm=Fin"]
+            # 文語助動詞
+            if elems["LEMMA"] == "べし":
+                feat = ["Mood=Nec"]
+                if elems["FORM"] == "べき":
+                    feat += ["VerbForm=Part"]
+                    if "VerbForm=Fin" in prev["FEATS"]:
+                        prev["FEATS"].remove("VerbForm=Fin")
+            elems["COMBINED"] = True
+            j = 1
+            while self.table[i-j]["COMBINED"] == True:
+                j += 1
+            self.table[i-j]["FEATS"] += list(set(feat))
+            self.table[i-j]["FORM"] += elems["FORM"]
+
+    def conjunctive_particles(self, n: int, i: int, elems: list):
+        """
+        Likewise, n is just for testing.
+        """
+        if elems["UPOS"] == "SCONJ":
+            feat = []
+            try:
+                feat = morphdic[elems["LEMMA"]]
+            except:
+                print("There is no feature for {} in morphdic (sent {}).".format(elems["LEMMA"], n))
+            indep_sconj = ["が", "せよ"]
+            if elems["FORM"] in indep_sconj:
+                # It can be an independent SCONJ 
+                return
+            elems["COMBINED"] = True
+            j = 1
+            while self.table[i-j]["COMBINED"] == True:
+                j += 1
+            self.table[i-j]["FEATS"] += feat
+            self.table[i-j]["FORM"] += elems["FORM"]
+
+    def verbal_stem_vowel(self, i: int, elems: list):
+        """
+        This conversion function is for supplementing vebral features
+        that are not indicated by auxiliary-suffixes.
+        For example, it gives the VerbForm=Fin feature for verbs with
+        the declarative form (終止形).
+        """
+        if elems["UPOS"] in ["VERB", "AUX"]:
+            # optative/hortative
+            if is_opt(elems):
+                elems["FEATS"] += ["Mood=Opt", "VerbForm=Fin"]
+
+            # shuushikei and rentaikei of verbs
+            elif is_udan(elems) and not [f for f in elems["FEATS"] if f.startswith("VerbForm=")]:
+                j = 0
+                while self.table[i-j]["COMBINED"] == True:
+                    j += 1
+                self.table[i-j]["FEATS"] += ["Tense=Pres", "VerbForm=Fin"]
+            
+            # elif is_opt(elems):
+            #     elems["FEATS"] += ["Mood=Opt", "VerbForm=Fin"]
+
 
 def convert(sents):
     for n, sent in enumerate(sents):
         sentence = sent[2].split(" = ")[1]
         print("Processing sentence No. {}: {}".format(n+1, sentence))
         table = sent[4:]
+        combine = Combine(table, n, sentence)
         for i, elems in enumerate(table):
             if elems["COMBINED"] == True:
                 continue
             prev = table[i-1]
-            if i < len(table) - 1:
-                next = table[i+1]
-            combine = Combine(table)
+            # compound noun
             combine.compound_noun(i, elems)
-            # compound nouns alternative
-            # if elems["DEPREL"] == "compound" and elems["LEMMA"] not in (auxnoun + exceptions) and elems["XPOS"] not in ["接尾辞-名詞的-一般", "接尾辞-形状詞的"]:
-            #     end = int(elems["HEAD"])
-            #     for k in range(i+1, end):
-            #         elems["FORM"] += table[k]["FORM"]
-            #         elems["LEMMA"] += table[k]["LEMMA"]
-            #         table[k]["COMBINED"] = True
-            #     elems["UPOS"] = table[end-1]["UPOS"]
-            #     elems["DEPREL"] = table[end-1]["DEPREL"]
-            #     elems["HEAD"] = table[end-1]["HEAD"]
-            #     elems["XPOS"] = table[end-1]["XPOS"]
-
-            # compound nouns
-            # if elems["UPOS"] in ["NOUN", "PROPN", "ADJ", "SYM", "NUM"] and elems["DEPREL"] == "compound" and int(elems["HEAD"]) > int(elems["ID"]):
-            #     end = int(elems["HEAD"])  # compound-final noun
-            #     if i > 0:
-            #         if prev["DEPREL"] != "compound":
-            #             if next["DEPREL"] != "compound":
-            #                 # it's a two-token compound
-            #                 elems["FORM"] += next["FORM"]
-            #                 elems["LEMMA"] += next["LEMMA"]
-            #                 elems["DEPREL"] = next["DEPREL"]
-            #                 elems["UPOS"] = next["UPOS"]
-            #                 elems["XPOS"] = next["XPOS"]
-            #                 elems["HEAD"] = next["HEAD"]
-            #                 next["COMBINED"] = True
-            #                 next["HEAD"] = elems["ID"]
-            #                 continue
-            #             else:
-            #                 # it's the compound-initial noun, so don't combine
-            #                 continue
-            #     else:
-            #         # it's the first token
-            #         continue
-            #     j = 1
-            #     while table[i-j]["COMBINED"] == True:
-            #         j += 1
-            #     table[i-j]["FORM"] += elems["FORM"]
-            #     table[i-j]["LEMMA"] += elems["LEMMA"]
-            #     elems["COMBINED"] = True
-            #     elems["HEAD"] = table[i-j]["ID"]
-            #     # combine the compound-final noun
-            #     if i == end - 2:
-            #         table[i-j]["FORM"] += table[i+1]["FORM"]
-            #         table[i-j]["LEMMA"] += table[i+1]["LEMMA"]
-            #         table[i-j]["DEPREL"] = table[i+1]["DEPREL"]
-            #         table[i-j]["UPOS"] = table[i+1]["UPOS"]
-            #         table[i-j]["XPOS"] = table[i+1]["XPOS"]
-            #         table[i-j]["HEAD"] = table[i+1]["HEAD"]
-            #         table[i+1]["COMBINED"] = True
-            #         table[i+1]["HEAD"] = table[i-j]["ID"]
-            
+                        
             # suffix
-            if elems["XPOS"] == "接尾辞-名詞的-一般":
-                j = 1
-                while table[i-j]["COMBINED"] == True:
-                    j += 1
-                table[i-j]["FORM"] += elems["FORM"]
-                table[i-j]["LEMMA"] += elems["LEMMA"]
-                table[i-j]["UPOS"] = "NOUN"
-                table[i-j]["DEPREL"] = elems["DEPREL"]
-                table[i-j]["HEAD"] = elems["HEAD"]
-                elems["COMBINED"] = True
-            if elems["XPOS"] == "接尾辞-形状詞的":
-                j = 1
-                while table[i-j]["COMBINED"] == True:
-                    j += 1
-                table[i-j]["FORM"] += elems["FORM"]
-                table[i-j]["LEMMA"] += elems["LEMMA"]
-                table[i-j]["UPOS"] = "ADJ"
-                table[i-j]["DEPREL"] = "amod"
-                # table[i-j]["HEAD"] = elems["HEAD"]
-                elems["COMBINED"] = True
+            combine.nominal_suffix(i, elems)
 
             # adp_combine
-            if elems["UPOS"] == "ADP":
-                if prev["UPOS"] == "PUNCT":
-                    # don't combine when e.g., "」と"
-                    if elems["FORM"] == "と":
-                        elems["DEPREL"] = "mark"
-                    continue
-                if prev["UPOS"] in ["VERB", "AUX"] and elems["FORM"] == "と":
-                    # don't combine quotative と (it is a complementizer); change the DEPREL to mark
-                    elems["DEPREL"] = "mark"
-                    continue
-                elif elems["XPOS"] == "助詞-係助詞":
-                    continue
-                elif elems["XPOS"] == "助詞-副助詞":
-                    continue
-                else:
-                    # prev["FORM"] += elems["FORM"]
-                    try:
-                        case = casedic[elems["FORM"]]
-                    except:
-                        print("There is no case for {} in casedic.".format(elems["FORM"]))
-                    j = 1
-                    while table[i-j]["COMBINED"] == True:
-                        j += 1
-                    table[i-j]["FEATS"] += case
-                    table[i-j]["FORM"] += elems["FORM"]
-                    # prev["FEATS"] += [case]
-                    elems["COMBINED"] = True
+            if stage >= 2:
+                combine.case_suffix(i, elems)
 
             # aux_combine
-            elif elems["UPOS"] == "AUX":
+            if elems["UPOS"] == "AUX":
                 # Light verb construction
-                if (elems["XPOS"] == "動詞-非自立可能-サ行変格" or elems["XPOS"] == "動詞-非自立可能-上一段-カ行") and prev["XPOS"] in ["名詞-普通名詞-サ変可能", "名詞-普通名詞-サ変形状詞可能"]:
-                    elems["UPOS"] = "VERB"
-                    elems["DEPREL"] = prev["DEPREL"]
-                    elems["HEAD"], prev["HEAD"] = prev["HEAD"], elems["ID"]
-                    j = 1
-                    while table[i-j]["COMBINED"] == True:
-                        j += 1
-                    table[i-j]["UPOS"] = "NOUN"
-                    table[i-j]["DEPREL"] = "compound:lvc"
-                    # change HEAD of any elems modifying lvc noun
-                    for word in table:
-                        if word["HEAD"] == prev["ID"]:
-                            word["HEAD"] = elems["ID"]
+                combine.light_verb_construction(i, elems)
+                
                 # darou
                 if elems["FORM"] == "だろう":
                     elems["FEATS"] += morphdic[elems["FORM"]]
                 if elems["FORM"] == "で":
                     elems["FEATS"] += ["VerbForm=Inf"] # renyookei of copula
+
                 # Inflection
-                elif elems["XPOS"].startswith("助動詞"):
-                    try:
-                        feat = morphdic[elems["LEMMA"]]
-                    except:
-                        print("There is no feature for {} in morphdic (sent {}).".format(elems["LEMMA"], n))
-                    if elems["XPOS"] == "助動詞-助動詞-ダ" and (prev["UPOS"] in ["NOUN", "SCONJ", "VERB", "ADJ"]) and elems["FORM"] != "な":
-                        if int(stage) == 4:
-                            feat = morphdic[elems["FORM"]]
-                            print(feat)
-                            elems["DEPREL"] = "cop"
-                        else:
-                            continue
-                    if elems["XPOS"] == "助動詞-文語助動詞-ナリ-断定":
-                        # early modern japanese copula
-                        continue
-                    # 形容動詞（形状詞）〜な
-                    elif elems["XPOS"] == "助動詞-助動詞-ダ" and elems["FORM"] == "な":
-                        feat = morphdic[elems["FORM"]]
-                    else:
-                        feat = morphdic[elems["LEMMA"]]
-                        # annotator's decision
-                        if feat == ["Mood=Pot|Voice=Pass"]:
-                            print("Specify the feature for the sentence: {}".format(sentence))
-                            print("Word: {}{}".format(prev["FORM"], elems["FORM"]))
-                            while True:
-                                rareru = input("Type m if Mood=Pot or v if Voice=Pass.")
-                                if rareru == "m":
-                                    feat = ["Mood=Pot"]
-                                    break
-                                elif rareru == "v":
-                                    feat = ["Voice=Pass"]
-                                    break
-                                else:
-                                    print("Input is an invalid character. Try again.")
-                        if feat == ["Aspect=Prosp|Evident=Nfh"]:
-                            print("Specify the feature for the sentence: {}".format(sentence))
-                            souda = input("Type a if Aspect=Prosp or e if Evident=Nfh.")
-                            if souda == "a":
-                                feat = ["Aspect=Prosp"]
-                            elif souda == "e":
-                                feat = ["Evident=Nfh"]
-                            else:
-                                print("Input is an invalid character.")
-                    # ない、ん
-                    if elems["FORM"] == "ない" and elems["XPOS"] == "助動詞-助動詞-ナイ" or elems["FORM"] == "ん" and elems["XPOS"] == "助動詞-助動詞-ヌ":
-                        feat += ["Tense=Pres", "VerbForm=Fin"]
-                    # 文語助動詞
-                    if elems["LEMMA"] == "べし":
-                        feat = ["Mood=Nec"]
-                        if elems["FORM"] == "べき":
-                            feat += ["VerbForm=Part"]
-                            if "VerbForm=Fin" in prev["FEATS"]:
-                                prev["FEATS"].remove("VerbForm=Fin")
-                    elems["COMBINED"] = True
-                    j = 1
-                    while table[i-j]["COMBINED"] == True:
-                        j += 1
-                    table[i-j]["FEATS"] += list(set(feat))
-                    table[i-j]["FORM"] += elems["FORM"]
+                combine.auxiliary(n, sentence, i, elems)
                 
             # SCONJ
-            elif elems["UPOS"] == "SCONJ":
-                try:
-                    feat = morphdic[elems["LEMMA"]]
-                except:
-                    print("There is no feature for {} in morphdic (sent {}).".format(elems["LEMMA"], n))
-                indep_sconj = ["が", "せよ"]
-                if elems["FORM"] in indep_sconj:
-                    # It can be an independent SCONJ 
-                    continue
-                elems["COMBINED"] = True
-                j = 1
-                while table[i-j]["COMBINED"] == True:
-                    j += 1
-                table[i-j]["FEATS"] += feat
-                table[i-j]["FORM"] += elems["FORM"]
-                # prev["FEATS"] += [morphdic[elems["FORM"]]]
+            combine.conjunctive_particles(n, i, elems)
+            # elif elems[" += [morphdic[elems["FORM"]]]
             
             # VERB
-            # if (elems["UPOS"] == "VERB" or elems["XPOS"] == "助動詞-助動詞-タ") and next["FORM"] == "。":
-            #     # processing "shuushikei" (sentence-final verb form)
-            #     j = 0 
-            #     while table[i-j]["COMBINED"] == True:
-            #         j += 1
-            #     table[i-j]["FEATS"] += ["VerbForm=Fin"]
-            if elems["UPOS"] in ["VERB", "AUX"]:
-                # print(is_opt(elems))
-                # optative/hortative
-                if is_opt(elems):
-                    elems["FEATS"] += ["Mood=Opt", "VerbForm=Fin"]
-                elif is_udan(elems) and not [f for f in elems["FEATS"] if f.startswith("VerbForm=")]:
-                    # shuushikei and rentaikei of verbs
-                    j = 0
-                    while table[i-j]["COMBINED"] == True:
-                        j += 1
-                    table[i-j]["FEATS"] += ["Tense=Pres", "VerbForm=Fin"]
-                
-                # elif is_opt(elems):
-                #     elems["FEATS"] += ["Mood=Opt", "VerbForm=Fin"]
+            combine.verbal_stem_vowel(i, elems)
 
 
 def reduce_id(sents):
