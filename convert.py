@@ -1,17 +1,21 @@
 import spacy
-import sys
 import romaji
+from argparse import ArgumentParser
 
-file = sys.argv[1]
-assert file.endswith(".conllu"), "Input file needs to be in the .conllu format."
-newfile = sys.argv[2]
-assert newfile.endswith(".conllu"), "Output file needs to be in the .conllu format."
-stage = int(sys.argv[3])
-assert stage in [1, 2, 3, 4], "Stage must be one of 1, 2, 3, and 4."
-print("Loading the data...")
+def argparser(stage):
+    parser = ArgumentParser(description="Convert Japanese SUW/LUW-based UD to morphology-aware UD")
+    parser.add_argument("source", type=str)
+    parser.add_argument("target", type=str)
+    parser.add_argument("-s", "--stage", type=int, default=stage, \
+        help="Specify the granularity of chunking. \
+            1 chunks only verbal conjugation and \
+            2 chunks nominal case markers.")
+    parser.add_argument("-c", "--compound", type=bool, default=False, \
+        help="Specify if you want to chunk compound nouns.")
+    return parser.parse_args()
+
 
 casedic = {
-        # "は": ["Case=Top"], # No!
            "が": ["Case=Nom"],
            "の": ["Case=Gen"],
            "に": ["Case=Dat"],
@@ -20,7 +24,7 @@ casedic = {
            "へ": ["Case=Lat"],
            "を": ["Case=Acc"],
            "と": ["Case=Com"], # "と" in "となる" is probably a SCONJ complementizer
-        #    "も": "Case=Top", # difference with "は"??
+           "より": ["Case=Cmp"]
            }
 
 morphdic = {# 助動詞
@@ -46,7 +50,6 @@ morphdic = {# 助動詞
             "だ": ["Tense=Pres"],
             "です": ["Polite=Form"],
             "てる": ["Aspect=Progr"],
-            "ながら": ["Aspect=Progr", "VerbForm=Conv"],
             # 文語助動詞
             "り": ["VerbForm=Part"], # おける
             "しめる": ["Voice=Cau"],
@@ -54,19 +57,22 @@ morphdic = {# 助動詞
             "て": ["VerbForm=Conv"],
             "で": ["VerbForm=Conv"],
             "ば": ["Mood=Cnd"],
-            "が": [None], # "しないが", "だが"
+            # "が": [None], # "しないが", "だが"
             "な": ["Tense=Pres", "VerbForm=Part"],
-            "の": ["VerbForm=Vnoun"], # 準体助詞「の」
+            # "の": ["VerbForm=Vnoun"], # 準体助詞「の」 Don't include
             "だろう": ["Mood=Irr"], # irrealis; speculation
-            "ている": ["Aspect=Prog"],
-            "たり": ["VerbForm=Exem"] # not in UD
+            # "ている": ["Aspect=Prog"],
+            "たり": ["VerbForm=Exem"], # not in UD
+            "ながら": ["Aspect=Progr", "VerbForm=Conv"],
+            "つつ": ["Aspect=Progr", "VerbForm=Conv"],
+            "たら": ["Cnd=Mood", "Tense=Past"],
             }
 
 # 補助名詞
-auxnoun = ["事"]
+AUXNOUN = ["事"]
 
 # exceptions (including mistakes in UD)
-exceptions = [
+EXCEPTIONS = [
             "蛹", #244
             "珍味", #244
                 ]
@@ -187,14 +193,15 @@ def read(file):
     return sents
 
 class Combine:
-    def __init__(self, table, n, sentence):
+    def __init__(self, table, n, sentence, stage):
         self.table = table
         self.n = n
         self.sentence = sentence
+        self.stage = stage
 
     def compound_noun(self, i: int, elems: list):
         if elems["DEPREL"] == "compound" and \
-            elems["LEMMA"] not in (auxnoun + exceptions) and \
+            elems["LEMMA"] not in (AUXNOUN + EXCEPTIONS) and \
             elems["XPOS"] not in ["接尾辞-名詞的-一般", "接尾辞-形状詞的"]:
 
             end = int(elems["HEAD"])
@@ -230,6 +237,7 @@ class Combine:
         In such a case, specify 1 as the value of the stage variable.
         """
         prev = self.table[i-1]
+        case = []
         if elems["UPOS"] == "ADP":
             if prev["UPOS"] == "PUNCT":
                 # don't combine when e.g., "」と"
@@ -302,7 +310,7 @@ class Combine:
             elif elems["XPOS"] == "助動詞-助動詞-ダ" and elems["FORM"] == "な":
                 feat = morphdic[elems["FORM"]]
             else:
-                feat = morphdic[elems["LEMMA"]]
+                # feat = morphdic[elems["LEMMA"]]
                 # annotator's decision
                 if feat == ["Mood=Pot|Voice=Pass"]:
                     print("Specify the feature for the sentence: {}".format(sentence))
@@ -327,8 +335,17 @@ class Combine:
                     else:
                         print("Input is an invalid character.")
             # ない、ん
-            if elems["FORM"] == "ない" and elems["XPOS"] == "助動詞-助動詞-ナイ" or elems["FORM"] == "ん" and elems["XPOS"] == "助動詞-助動詞-ヌ":
-                feat += ["Tense=Pres", "VerbForm=Fin"]
+            if elems["XPOS"] == "助動詞-助動詞-ナイ":
+                if elems["FORM"] == "ない":
+                    feat += ["Tense=Pres", "VerbForm=Fin"]
+                elif elems["FORM"] == "なく":
+                    feat += ["VerbForm=Inf"]
+            elif elems["XPOS"] == "助動詞-助動詞-ヌ":
+                if elems["FORM"] == "ず":
+                    feat += ["VerbForm=Inf"]
+                elif elems["FORM"] == "ん":
+                    feat += ["Tense=Pres", "VerbForm=Fin"]
+
             # 文語助動詞
             if elems["LEMMA"] == "べし":
                 feat = ["Mood=Nec"]
@@ -377,28 +394,29 @@ class Combine:
                 elems["FEATS"] += ["Mood=Opt", "VerbForm=Fin"]
 
             # shuushikei and rentaikei of verbs
-            elif is_udan(elems) and not [f for f in elems["FEATS"] if f.startswith("VerbForm=")]:
+            elif is_udan(elems):
                 j = 0
                 while self.table[i-j]["COMBINED"] == True:
                     j += 1
-                self.table[i-j]["FEATS"] += ["Tense=Pres", "VerbForm=Fin"]
-            
-            # elif is_opt(elems):
-            #     elems["FEATS"] += ["Mood=Opt", "VerbForm=Fin"]
+                if not any([True for f in self.table[i-j]["FEATS"] if f.startswith("VerbForm=")]):
+                    # VerbForm slot is still empty
+                    self.table[i-j]["FEATS"] += ["Tense=Pres", "VerbForm=Fin"]
 
-
-def convert(sents):
+def convert(sents, stage, compound):
     for n, sent in enumerate(sents):
         sentence = sent[2].split(" = ")[1]
         print("Processing sentence No. {}: {}".format(n+1, sentence))
         table = sent[4:]
-        combine = Combine(table, n, sentence)
+        combine = Combine(table, n, sentence, stage)
         for i, elems in enumerate(table):
             if elems["COMBINED"] == True:
                 continue
             prev = table[i-1]
-            # compound noun
-            combine.compound_noun(i, elems)
+
+            if compound:
+                # combine compound nouns when specified
+                # usually compound nouns are processed by LUW.
+                combine.compound_noun(i, elems)
                         
             # suffix
             combine.nominal_suffix(i, elems)
@@ -492,11 +510,6 @@ def write(newfile, sents):
     romanize = romaji.Romaji()
     with open(newfile, "w") as f:
         for i, sent in enumerate(sents):
-            # sent[0]: newdoc id
-            # sent[1]: sent id
-            # sent[2]: text
-            # sent[3]: translation
-            # sent[4]: elems
             if sent[0] != "":
                 # starting with newdoc id
                 f.write("{}".format(sent[0]))
@@ -531,8 +544,17 @@ def write(newfile, sents):
             f.write("\n")
     
 if __name__ == "__main__":
+    stage = 1
+    args = argparser(stage)
+    file = args.source
+    newfile = args.target
+    s = args.stage
+    assert s in [1, 2], "Stage must be 1 or 2."
+    c = args.compound
+
+    print("Loading the data...")
     sents = read(file)
-    convert(sents)
+    convert(sents, s, c)
     reduce_id(sents)
     reduce_head(sents)
     reduce_table(sents)
