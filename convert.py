@@ -50,6 +50,7 @@ morphdic = {# 助動詞
             "だ": ["Tense=Pres"],
             "です": ["Polite=Form"],
             "てる": ["Aspect=Progr"],
+            "ている": ["Aspect=Progr"],
             # 文語助動詞
             "り": ["VerbForm=Part"], # おける
             "しめる": ["Voice=Cau"],
@@ -295,6 +296,7 @@ class Combine:
             try:
                 feat = morphdic[elems["LEMMA"]]
             except:
+                feat = []
                 print("There is no feature for {} in morphdic (sent {}).".format(elems["LEMMA"], n))
             if elems["XPOS"] == "助動詞-助動詞-ダ" and (prev["UPOS"] in ["NOUN", "SCONJ", "VERB", "ADJ"]) and elems["FORM"] != "な":
                 if int(stage) == 4:
@@ -411,38 +413,32 @@ def convert(sents, stage, compound):
         for i, elems in enumerate(table):
             if elems["COMBINED"] == True:
                 continue
-            prev = table[i-1]
+            # prev = table[i-1]
 
             if compound:
                 # combine compound nouns when specified
                 # usually compound nouns are processed by LUW.
+                print("compounding nouns...")
                 combine.compound_noun(i, elems)
-                        
-            # suffix
-            combine.nominal_suffix(i, elems)
-
+                # suffix
+                combine.nominal_suffix(i, elems)
             # adp_combine
             if stage >= 2:
                 combine.case_suffix(i, elems)
-
             # aux_combine
             if elems["UPOS"] == "AUX":
                 # Light verb construction
                 combine.light_verb_construction(i, elems)
-                
                 # darou
                 if elems["FORM"] == "だろう":
                     elems["FEATS"] += morphdic[elems["FORM"]]
                 if elems["FORM"] == "で":
                     elems["FEATS"] += ["VerbForm=Inf"] # renyookei of copula
-
                 # Inflection
                 combine.auxiliary(n, sentence, i, elems)
-                
             # SCONJ
             combine.conjunctive_particles(n, i, elems)
             # elif elems[" += [morphdic[elems["FORM"]]]
-            
             # VERB
             combine.verbal_stem_vowel(i, elems)
 
@@ -551,6 +547,7 @@ if __name__ == "__main__":
     s = args.stage
     assert s in [1, 2], "Stage must be 1 or 2."
     c = args.compound
+    print(c)
 
     print("Loading the data...")
     sents = read(file)

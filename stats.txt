@@ -1,0 +1,4 @@
+pud_tested_suw_1.conllu	25933
+pud_tested_suw_2.conllu	21078
+pud_tested_luw_1.conllu	20139
+pud_tested_luw_2.conllu	15344
